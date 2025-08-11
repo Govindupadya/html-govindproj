@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Productivity Dashboard - AHT Tracker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root { --bg: #0f172a; --card: #111827; --muted: #94a3b8; --text: #e5e7eb; --accent: #22d3ee; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background: var(--bg); color: var(--text); }
+    header { padding: 20px 24px; border-bottom: 1px solid #1f2937; display: flex; align-items: center; justify-content: space-between; }
+    header h1 { margin: 0; font-size: 18px; }
+    header a { color: var(--muted); text-decoration: none; }
+    main { padding: 20px 24px; max-width: 1100px; margin: 0 auto; }
+    .toolbar { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 16px; }
+    .button { background: #1f2937; color: var(--text); border: 1px solid #374151; padding: 10px 14px; border-radius: 10px; cursor: pointer; }
+    .button:hover { border-color: #4b5563; }
+    .muted { color: var(--muted); }
+    .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin: 16px 0 22px; }
+    .card { background: var(--card); border: 1px solid #1f2937; border-radius: 14px; padding: 16px; }
+    .card h3 { margin: 0 0 6px; font-weight: 600; font-size: 14px; color: var(--muted); }
+    .card .value { font-size: 24px; font-weight: 700; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+    .panel { background: var(--card); border: 1px solid #1f2937; border-radius: 14px; padding: 16px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 10px 12px; border-bottom: 1px solid #1f2937; text-align: left; }
+    th { color: var(--muted); font-weight: 600; }
+    tr:hover td { background: rgba(255,255,255,0.02); }
+    .footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
+    @media (max-width: 980px) { .cards { grid-template-columns: 1fr 1fr; } .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Productivity Dashboard <span class="muted">· AHT Tracker</span></h1>
+    <a href="./index.html">Back to home</a>
+  </header>
+  <main>
+    <div class="toolbar">
+      <label class="button" for="csvInput">Upload CSV</label>
+      <input id="csvInput" type="file" accept=".csv" style="display:none" />
+      <a class="button" href="./aht_template.csv" download>Download CSV template</a>
+      <span class="muted">Required headers: Process, Allocated, Processed, Productivity%, Average AHT</span>
+    </div>
+
+    <section class="cards">
+      <div class="card"><h3>Total Allocated</h3><div id="totalAllocated" class="value">0</div></div>
+      <div class="card"><h3>Total Processed</h3><div id="totalProcessed" class="value">0</div></div>
+      <div class="card"><h3>Overall Productivity</h3><div id="overallProd" class="value">0%</div></div>
+      <div class="card"><h3>Overall Avg AHT</h3><div id="overallAht" class="value">0</div></div>
+    </section>
+
+    <div class="grid">
+      <section class="panel">
+        <h3 class="muted">Data</h3>
+        <div style="overflow:auto;">
+          <table id="dataTable">
+            <thead>
+              <tr>
+                <th>Process</th>
+                <th>Allocated</th>
+                <th>Processed</th>
+                <th>Productivity%</th>
+                <th>Average AHT</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="footer">Tip: If Productivity% is empty in CSV, it will be computed as Processed/Allocated × 100.</div>
+      </section>
+
+      <section class="panel">
+        <h3 class="muted">Charts</h3>
+        <canvas id="prodChart" height="180"></canvas>
+        <div style="height:14px"></div>
+        <canvas id="ahtChart" height="180"></canvas>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    const csvInput = document.getElementById('csvInput');
+    const dataTableBody = document.querySelector('#dataTable tbody');
+    const totalAllocatedEl = document.getElementById('totalAllocated');
+    const totalProcessedEl = document.getElementById('totalProcessed');
+    const overallProdEl = document.getElementById('overallProd');
+    const overallAhtEl = document.getElementById('overallAht');
+
+    let prodChart, ahtChart;
+
+    function parseNumber(value) {
+      if (value === null || value === undefined) return 0;
+      if (typeof value === 'number') return value;
+      const cleaned = String(value).replace(/[%,$\s]/g, '');
+      const num = Number(cleaned);
+      return isNaN(num) ? 0 : num;
+    }
+
+    function formatNumber(num) {
+      return new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(num);
+    }
+
+    function computeDerived(rows) {
+      return rows.map(r => {
+        const allocated = parseNumber(r['Allocated']);
+        const processed = parseNumber(r['Processed']);
+        let prodPct = r['Productivity%'];
+        const hasProd = prodPct !== undefined && String(prodPct).trim() !== '';
+        const computed = allocated > 0 ? (processed / allocated) * 100 : 0;
+        const productivityPct = hasProd ? parseNumber(prodPct) : computed;
+        const avgAht = parseNumber(r['Average AHT']);
+        const process = r['Process'] !== undefined ? String(r['Process']).trim() : '';
+        return { process, allocated, processed, productivityPct, avgAht };
+      }).filter(r => r.process !== '' || r.allocated + r.processed + r.productivityPct + r.avgAht > 0);
+    }
+
+    function computeTotals(rows) {
+      const totals = rows.reduce((acc, r) => {
+        acc.allocated += r.allocated;
+        acc.processed += r.processed;
+        acc.weightedAhtNumerator += r.avgAht * r.processed;
+        return acc;
+      }, { allocated: 0, processed: 0, weightedAhtNumerator: 0 });
+
+      const overallProd = totals.allocated > 0 ? (totals.processed / totals.allocated) * 100 : 0;
+      const overallAht = totals.processed > 0 ? (totals.weightedAhtNumerator / totals.processed) : 0;
+      return { totals, overallProd, overallAht };
+    }
+
+    function renderTable(rows) {
+      dataTableBody.innerHTML = '';
+      for (const r of rows) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${r.process}</td>
+          <td>${formatNumber(r.allocated)}</td>
+          <td>${formatNumber(r.processed)}</td>
+          <td>${formatNumber(r.productivityPct)}%</td>
+          <td>${formatNumber(r.avgAht)}</td>
+        `;
+        dataTableBody.appendChild(tr);
+      }
+    }
+
+    function renderKpis(rows) {
+      const { totals, overallProd, overallAht } = computeTotals(rows);
+      totalAllocatedEl.textContent = formatNumber(totals.allocated);
+      totalProcessedEl.textContent = formatNumber(totals.processed);
+      overallProdEl.textContent = `${formatNumber(overallProd)}%`;
+      overallAhtEl.textContent = formatNumber(overallAht);
+    }
+
+    function renderCharts(rows) {
+      const labels = rows.map(r => r.process);
+      const prodData = rows.map(r => r.productivityPct);
+      const ahtData = rows.map(r => r.avgAht);
+
+      const prodCfg = {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [{
+            label: 'Productivity %',
+            data: prodData,
+            backgroundColor: 'rgba(34, 211, 238, 0.4)',
+            borderColor: 'rgba(34, 211, 238, 1)',
+            borderWidth: 1.5,
+          }]
+        },
+        options: {
+          responsive: true,
+          scales: {
+            y: { beginAtZero: true, ticks: { callback: v => v + '%' } }
+          },
+          plugins: { legend: { labels: { color: '#e5e7eb' } } }
+        }
+      };
+
+      const ahtCfg = {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{
+            label: 'Average AHT',
+            data: ahtData,
+            tension: 0.3,
+            borderColor: 'rgba(139, 92, 246, 1)',
+            backgroundColor: 'rgba(139, 92, 246, 0.25)',
+            fill: true,
+            pointRadius: 3,
+          }]
+        },
+        options: {
+          responsive: true,
+          scales: { y: { beginAtZero: true } },
+          plugins: { legend: { labels: { color: '#e5e7eb' } } }
+        }
+      };
+
+      if (prodChart) prodChart.destroy();
+      if (ahtChart) ahtChart.destroy();
+      prodChart = new Chart(document.getElementById('prodChart'), prodCfg);
+      ahtChart = new Chart(document.getElementById('ahtChart'), ahtCfg);
+    }
+
+    function loadFromRows(rows) {
+      const normalized = computeDerived(rows);
+      renderTable(normalized);
+      renderKpis(normalized);
+      renderCharts(normalized);
+    }
+
+    csvInput.addEventListener('change', (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      Papa.parse(file, {
+        header: true,
+        skipEmptyLines: true,
+        complete: (results) => {
+          loadFromRows(results.data);
+        },
+        error: (err) => {
+          alert('Failed to parse CSV: ' + err.message);
+        }
+      });
+    });
+
+    // Optional: demo dataset so the page isn't empty before upload
+    const demo = [
+      { 'Process': 'Quality Check', 'Allocated': 100, 'Processed': 90, 'Productivity%': '', 'Average AHT': 300 },
+      { 'Process': 'Data Entry', 'Allocated': 80, 'Processed': 60, 'Productivity%': '', 'Average AHT': 420 },
+      { 'Process': 'Verification', 'Allocated': 50, 'Processed': 45, 'Productivity%': '', 'Average AHT': 360 }
+    ];
+    loadFromRows(demo);
+  </script>
+</body>
+</html>
